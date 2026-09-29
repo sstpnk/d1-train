@@ -49,6 +49,7 @@ class MainActivity : Activity() {
     private lateinit var outboundList: LinearLayout
     private lateinit var inboundList: LinearLayout
     private var pullStartY = -1f
+    private var pullDistance = 0f
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -347,11 +348,11 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(18), 0, 0)
         }
-        actions.addView(pill("Отмена", Palette.card, Palette.text).apply {
+        actions.addView(settingsActionButton("Отмена", Palette.card, Palette.text).apply {
             setOnClickListener { dialog.dismiss() }
         })
-        actions.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-        actions.addView(pill("Сохранить", Palette.accent, Palette.bg).apply {
+        actions.addView(hSpace(12))
+        actions.addView(settingsActionButton("Сохранить", Palette.accent, Palette.bg).apply {
             setOnClickListener {
                 val from = fromSpinner.selectedItem?.toString().orEmpty()
                 val to = toSpinner.selectedItem?.toString().orEmpty()
@@ -409,24 +410,28 @@ class MainActivity : Activity() {
         setOnTouchListener { view, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    pullStartY = if ((view as ScrollView).scrollY == 0) event.rawY else -1f
+                    pullStartY = event.rawY
+                    pullDistance = 0f
+                    contentRoot.animate().cancel()
                 }
 
                 MotionEvent.ACTION_MOVE -> {
-                    val scroll = view as ScrollView
                     val delta = event.rawY - pullStartY
-                    if (pullStartY >= 0 && scroll.scrollY == 0 && delta > 0) {
-                        contentRoot.translationY = minOf(dp(88).toFloat(), delta * 0.36f)
+                    if (pullStartY >= 0 && delta > 0) {
+                        val maxPull = dp(126).toFloat()
+                        pullDistance = maxPull * (1f - 1f / (1f + delta / maxPull))
+                        contentRoot.translationY = pullDistance
                     }
                 }
 
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     val delta = event.rawY - pullStartY
-                    if (pullStartY >= 0 && (view as ScrollView).scrollY == 0 && delta > dp(90)) {
+                    if (pullStartY >= 0 && delta > dp(120)) {
                         refresh()
                     }
-                    contentRoot.animate().translationY(0f).setDuration(160).start()
+                    contentRoot.animate().translationY(0f).setDuration(220).start()
                     pullStartY = -1f
+                    pullDistance = 0f
                 }
             }
             false
@@ -485,8 +490,20 @@ class MainActivity : Activity() {
             background = rounded(bg, dp(14), 0, 0)
         }
 
+    private fun settingsActionButton(textValue: String, bg: Int, fg: Int): TextView =
+        label(textValue, 16f, fg, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(18), 0, dp(18), 0)
+            background = rounded(bg, dp(16), 0, 0)
+            layoutParams = LinearLayout.LayoutParams(0, dp(58), 1f)
+        }
+
     private fun space(height: Int): View = View(this).apply {
         layoutParams = LinearLayout.LayoutParams(1, dp(height))
+    }
+
+    private fun hSpace(width: Int): View = View(this).apply {
+        layoutParams = LinearLayout.LayoutParams(dp(width), 1)
     }
 
     private fun rounded(color: Int, radius: Int, strokeColor: Int, strokeWidth: Int): GradientDrawable =
