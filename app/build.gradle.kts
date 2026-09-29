@@ -4,11 +4,11 @@ apply(plugin = "com.android.application")
 apply(plugin = "org.jetbrains.kotlin.android")
 
 extensions.configure<ApplicationExtension>("android") {
-    namespace = "ru.local.d1train"
+    namespace = "com.sstpnk.mcd"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "ru.local.d1train"
+        applicationId = "com.sstpnk.mcd"
         minSdk = 26
         targetSdk = 35
         versionCode = 1

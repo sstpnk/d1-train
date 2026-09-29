@@ -1,7 +1,8 @@
-package ru.local.d1train
+package com.sstpnk.mcd
 
 import android.app.Activity
 import android.app.Dialog
+import android.content.Context
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -10,13 +11,18 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
 import android.view.WindowInsets
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
+import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
 import org.json.JSONArray
 import org.json.JSONObject
@@ -35,9 +41,14 @@ class MainActivity : Activity() {
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newFixedThreadPool(3)
     private val api = RaspApi()
+    private val prefs by lazy { getSharedPreferences("settings", Context.MODE_PRIVATE) }
     private lateinit var clock: TextView
+    private lateinit var contentRoot: LinearLayout
+    private lateinit var board: LinearLayout
+    private lateinit var scroller: ScrollView
     private lateinit var outboundList: LinearLayout
     private lateinit var inboundList: LinearLayout
+    private var pullStartY = -1f
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -68,6 +79,7 @@ class MainActivity : Activity() {
                 }
             }
         }
+        contentRoot = root
 
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -75,28 +87,24 @@ class MainActivity : Activity() {
         }
         clock = label("", 13f, Palette.muted, false)
         header.addView(clock, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        header.addView(pill("Обновить", Palette.card, Palette.text).apply { setOnClickListener { refresh() } })
+        header.addView(settingsButton())
         root.addView(header)
 
-        val board = LinearLayout(this).apply {
+        board = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(12), 0, 0)
         }
-        outboundList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        inboundList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-
-        board.addView(directionPanel("Окружная", "Белорусский вокзал", "в центр", outboundList))
-        board.addView(space(10))
-        board.addView(directionPanel("Белорусский вокзал", "Окружная", "из центра", inboundList))
         root.addView(board)
-        return ScrollView(this).apply {
+        scroller = ScrollView(this).apply {
             setBackgroundColor(Palette.bg)
-            isFillViewport = false
+            isFillViewport = true
+            setPullToRefresh()
             addView(root, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
+        return scroller
     }
 
-    private fun directionPanel(from: String, to: String, hint: String, list: LinearLayout): View {
+    private fun directionPanel(lineId: String, from: String, to: String, hint: String, list: LinearLayout): View {
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(12), dp(14), dp(10))
@@ -108,7 +116,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         val marker = TextView(this).apply {
-            text = "D1"
+            text = lineId
             setTextColor(Palette.bg)
             setTypeface(Typeface.DEFAULT, Typeface.BOLD)
             textSize = 15f
@@ -133,16 +141,29 @@ class MainActivity : Activity() {
     private fun refresh() {
         val now = ZonedDateTime.now(MOSCOW_ZONE)
         clock.text = "Московское время: ${TIME_FORMAT.format(now)}"
+        val route = selectedRoute()
+        board.removeAllViews()
+        if (route == null) {
+            showEmptySelection()
+            return
+        }
+
+        outboundList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        inboundList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        board.addView(directionPanel(route.line.id, route.from, route.to, "туда", outboundList))
+        board.addView(space(10))
+        board.addView(directionPanel(route.line.id, route.to, route.from, "обратно", inboundList))
+
         outboundList.removeAllViews()
         inboundList.removeAllViews()
         outboundList.addView(loadingRow())
         inboundList.addView(loadingRow())
 
-        loadDirection(Direction.OKR_TO_BEL, outboundList)
-        loadDirection(Direction.BEL_TO_OKR, inboundList)
+        loadDirection(RouteDirection(route.line, route.from, route.to), outboundList)
+        loadDirection(RouteDirection(route.line, route.to, route.from), inboundList)
     }
 
-    private fun loadDirection(direction: Direction, container: LinearLayout) {
+    private fun loadDirection(direction: RouteDirection, container: LinearLayout) {
         io.execute {
             val result = runCatching { api.trains(direction).take(5) }
             main.post {
@@ -160,7 +181,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun trainCard(direction: Direction, train: Train): View {
+    private fun trainCard(direction: RouteDirection, train: Train): View {
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(12), dp(14), dp(12))
@@ -196,7 +217,7 @@ class MainActivity : Activity() {
         return card
     }
 
-    private fun showStops(direction: Direction, train: Train) {
+    private fun showStops(direction: RouteDirection, train: Train) {
         val dialog = Dialog(this)
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         val body = LinearLayout(this).apply {
@@ -238,6 +259,177 @@ class MainActivity : Activity() {
                     list.addView(emptyRow("Не удалось открыть расписание: ${it.shortMessage()}"))
                 }
             }
+        }
+    }
+
+    private fun showEmptySelection() {
+        val empty = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            minimumHeight = resources.displayMetrics.heightPixels - dp(180)
+        }
+        empty.addView(label("Выбери линию и станции", 18f, Palette.muted, false).apply {
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, dp(14))
+        })
+        empty.addView(pill("Выбрать станции", Palette.accent, Palette.bg).apply {
+            textSize = 22f
+            setPadding(dp(24), dp(14), dp(24), dp(14))
+            setOnClickListener { showSettings() }
+        })
+        board.addView(empty, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+    }
+
+    private fun settingsButton(): View =
+        ImageButton(this).apply {
+            setImageResource(R.drawable.ic_settings_24)
+            setColorFilter(Palette.text)
+            background = rounded(Palette.card, dp(14), 0, 0)
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            contentDescription = "Настройки"
+            setOnClickListener { showSettings() }
+            layoutParams = LinearLayout.LayoutParams(dp(44), dp(44))
+        }
+
+    private fun showSettings() {
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        val current = selectedRoute()
+        var activeLine = current?.line ?: MCD_LINES.first()
+
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(16), dp(18), dp(16))
+            background = rounded(Palette.panel, dp(24), Palette.stroke, 1)
+        }
+        body.addView(label("Настройки маршрута", 24f, Palette.text, true))
+        body.addView(label("Линия МЦД", 13f, Palette.muted, false).apply { setPadding(0, dp(14), 0, dp(4)) })
+
+        val lineSpinner = Spinner(this)
+        val fromSpinner = Spinner(this)
+        val toSpinner = Spinner(this)
+        val error = label("", 13f, Color.rgb(255, 116, 128), false).apply {
+            visibility = View.GONE
+            setPadding(0, dp(8), 0, 0)
+        }
+
+        lineSpinner.adapter = spinnerAdapter(MCD_LINES.map { "${it.id} · ${it.title}" })
+        lineSpinner.setSelection(MCD_LINES.indexOf(activeLine).coerceAtLeast(0))
+        body.addView(lineSpinner)
+        body.addView(label("Начальная станция", 13f, Palette.muted, false).apply { setPadding(0, dp(12), 0, dp(4)) })
+        body.addView(fromSpinner)
+        body.addView(label("Конечная станция", 13f, Palette.muted, false).apply { setPadding(0, dp(12), 0, dp(4)) })
+        body.addView(toSpinner)
+        body.addView(error)
+
+        fun updateStations(line: McdLine, keepSelection: Boolean) {
+            activeLine = line
+            val adapter = spinnerAdapter(line.stations)
+            fromSpinner.adapter = adapter
+            toSpinner.adapter = spinnerAdapter(line.stations)
+            val fromIndex = if (keepSelection) line.stations.indexOf(current?.from) else -1
+            val toIndex = if (keepSelection) line.stations.indexOf(current?.to) else -1
+            fromSpinner.setSelection(fromIndex.takeIf { it >= 0 } ?: line.defaultFromIndex)
+            toSpinner.setSelection(toIndex.takeIf { it >= 0 } ?: line.defaultToIndex)
+        }
+
+        lineSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                updateStations(MCD_LINES[position], keepSelection = MCD_LINES[position] == current?.line)
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+        updateStations(activeLine, keepSelection = true)
+
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(18), 0, 0)
+        }
+        actions.addView(pill("Отмена", Palette.card, Palette.text).apply {
+            setOnClickListener { dialog.dismiss() }
+        })
+        actions.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        actions.addView(pill("Сохранить", Palette.accent, Palette.bg).apply {
+            setOnClickListener {
+                val from = fromSpinner.selectedItem?.toString().orEmpty()
+                val to = toSpinner.selectedItem?.toString().orEmpty()
+                if (from == to) {
+                    error.text = "Выбери разные станции"
+                    error.visibility = View.VISIBLE
+                    return@setOnClickListener
+                }
+                prefs.edit()
+                    .putString(PREF_LINE, activeLine.id)
+                    .putString(PREF_FROM, from)
+                    .putString(PREF_TO, to)
+                    .apply()
+                dialog.dismiss()
+                refresh()
+            }
+        })
+        body.addView(actions)
+
+        dialog.setContentView(body)
+        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        dialog.show()
+    }
+
+    private fun selectedRoute(): RouteConfig? {
+        val lineId = prefs.getString(PREF_LINE, null) ?: return null
+        val line = MCD_LINES.firstOrNull { it.id == lineId } ?: return null
+        val from = prefs.getString(PREF_FROM, null)?.takeIf { it in line.stations } ?: return null
+        val to = prefs.getString(PREF_TO, null)?.takeIf { it in line.stations && it != from } ?: return null
+        return RouteConfig(line, from, to)
+    }
+
+    private fun spinnerAdapter(items: List<String>): ArrayAdapter<String> =
+        object : ArrayAdapter<String>(this, android.R.layout.simple_spinner_item, items) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View =
+                (super.getView(position, convertView, parent) as TextView).apply {
+                    setTextColor(Palette.text)
+                    textSize = 16f
+                }
+
+            override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View =
+                (super.getDropDownView(position, convertView, parent) as TextView).apply {
+                    setTextColor(Palette.text)
+                    setBackgroundColor(Palette.card)
+                    textSize = 16f
+                    minHeight = dp(44)
+                    setPadding(dp(14), dp(10), dp(14), dp(10))
+                }
+        }.apply {
+            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
+
+    private fun ScrollView.setPullToRefresh() {
+        setOnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    pullStartY = if ((view as ScrollView).scrollY == 0) event.rawY else -1f
+                }
+
+                MotionEvent.ACTION_MOVE -> {
+                    val scroll = view as ScrollView
+                    val delta = event.rawY - pullStartY
+                    if (pullStartY >= 0 && scroll.scrollY == 0 && delta > 0) {
+                        contentRoot.translationY = minOf(dp(88).toFloat(), delta * 0.36f)
+                    }
+                }
+
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    val delta = event.rawY - pullStartY
+                    if (pullStartY >= 0 && (view as ScrollView).scrollY == 0 && delta > dp(90)) {
+                        refresh()
+                    }
+                    contentRoot.animate().translationY(0f).setDuration(160).start()
+                    pullStartY = -1f
+                }
+            }
+            false
         }
     }
 
@@ -330,42 +522,209 @@ private object Palette {
     val dim = Color.rgb(112, 116, 123)
     val accent = Color.rgb(246, 200, 76)
     val green = Color.rgb(93, 216, 106)
+    val late = Color.rgb(118, 123, 132)
 }
 
-private enum class Direction(
-    val fromKey: String,
-    val fromTitle: String,
-    val fromSlug: String,
-    val toKey: String,
-    val toTitle: String,
-    val toSlug: String,
-    val fromShort: String,
-    val toShort: String,
-    val distance: Double
+private const val PREF_LINE = "line"
+private const val PREF_FROM = "from"
+private const val PREF_TO = "to"
+
+private data class McdLine(
+    val id: String,
+    val title: String,
+    val stations: List<String>,
+    val defaultFromIndex: Int,
+    val defaultToIndex: Int
+)
+
+private data class RouteConfig(
+    val line: McdLine,
+    val from: String,
+    val to: String
+)
+
+private data class RouteDirection(
+    val line: McdLine,
+    val from: String,
+    val to: String
 ) {
-    OKR_TO_BEL(
-        "s9601830",
-        "Окружная",
-        "okruzhnaya-platform",
-        "s2000006",
-        "Москва (Белорусский вокзал)",
-        "moscow-belorusskaya",
-        "Окружная",
-        "Белорусский",
-        7.927423230124116
-    ),
-    BEL_TO_OKR(
-        "s2000006",
-        "Москва (Белорусский вокзал)",
-        "moscow-belorusskaya",
-        "s9601830",
-        "Окружная",
-        "okruzhnaya-platform",
-        "Белорусский",
-        "Окружная",
-        7.927423230124116
-    )
+    val fromShort: String = from.cleanTitle()
+    val toShort: String = to.cleanTitle()
 }
+
+private val MCD_LINES = listOf(
+    McdLine(
+        id = "D1",
+        title = "Белорусско-Савёловский",
+        stations = listOf(
+            "Лобня",
+            "Шереметьевская",
+            "Хлебниково",
+            "Водники",
+            "Долгопрудная",
+            "Новодачная",
+            "Марк",
+            "Лианозово",
+            "Бескудниково",
+            "Дегунино",
+            "Окружная",
+            "Тимирязевская",
+            "Дмитровская",
+            "Москва (Савёловский вокзал)",
+            "Москва (Белорусский вокзал)",
+            "Беговая",
+            "Москва-Сити",
+            "Фили",
+            "Славянский Бульвар",
+            "Кунцевская",
+            "Рабочий Посёлок",
+            "Сетунь",
+            "Немчиновка",
+            "Сколково",
+            "Баковка",
+            "Одинцово"
+        ),
+        defaultFromIndex = 10,
+        defaultToIndex = 14
+    ),
+    McdLine(
+        id = "D2",
+        title = "Курско-Рижский",
+        stations = listOf(
+            "Нахабино",
+            "Аникеевка",
+            "Опалиха",
+            "Красногорская",
+            "Павшино",
+            "Пенягино",
+            "Волоколамская",
+            "Трикотажная",
+            "Тушинская",
+            "Щукинская",
+            "Стрешнево",
+            "Красный Балтиец",
+            "Гражданская",
+            "Дмитровская",
+            "Марьина Роща",
+            "Рижская",
+            "Площадь трёх вокзалов",
+            "Москва (Курский вокзал)",
+            "Москва-Товарная",
+            "Калитники",
+            "Новохохловская",
+            "Текстильщики",
+            "Печатники",
+            "Люблино",
+            "Депо",
+            "Перерва",
+            "Курьяново",
+            "Москворечье",
+            "Царицыно",
+            "Покровское",
+            "Красный Строитель",
+            "Битца",
+            "Бутово",
+            "Щербинка",
+            "Остафьево",
+            "Силикатная",
+            "Подольск"
+        ),
+        defaultFromIndex = 17,
+        defaultToIndex = 28
+    ),
+    McdLine(
+        id = "D3",
+        title = "Ленинградско-Казанский",
+        stations = listOf(
+            "Зеленоград-Крюково",
+            "Малино",
+            "Фирсановская",
+            "Сходня",
+            "Подрезково",
+            "Новоподрезково",
+            "Молжаниново",
+            "Химки",
+            "Левобережная",
+            "Ховрино",
+            "Грачёвская",
+            "Моссельмаш",
+            "Лихоборы",
+            "Петровско-Разумовская",
+            "Останкино",
+            "Митьково",
+            "Электрозаводская",
+            "Сортировочная",
+            "Авиамоторная",
+            "Андроновка",
+            "Перово",
+            "Плющево",
+            "Вешняки",
+            "Выхино",
+            "Косино",
+            "Ухтомская",
+            "Люберцы",
+            "Панки",
+            "Томилино",
+            "Красково",
+            "Малаховка",
+            "Удельная",
+            "Быково",
+            "Ильинская",
+            "Отдых",
+            "Кратово",
+            "Есенинская",
+            "Фабричная",
+            "Раменское",
+            "Ипподром"
+        ),
+        defaultFromIndex = 13,
+        defaultToIndex = 23
+    ),
+    McdLine(
+        id = "D4",
+        title = "Калужско-Нижегородский",
+        stations = listOf(
+            "Апрелевка",
+            "Победа",
+            "Крёкшино",
+            "Санино",
+            "Кокошкино",
+            "Толстопальцево",
+            "Лесной Городок",
+            "Внуково",
+            "Мичуринец",
+            "Переделкино",
+            "Солнечная",
+            "Мещерская",
+            "Очаково",
+            "Аминьевская",
+            "Минская",
+            "Поклонная",
+            "Кутузовская",
+            "Москва-Сити",
+            "Беговая",
+            "Москва (Белорусский вокзал)",
+            "Москва (Савёловский вокзал)",
+            "Марьина Роща",
+            "Рижская",
+            "Площадь трёх вокзалов",
+            "Москва (Курский вокзал)",
+            "Серп и Молот",
+            "Нижегородская",
+            "Чухлинка",
+            "Кусково",
+            "Новогиреево",
+            "Реутов",
+            "Никольское",
+            "Салтыковская",
+            "Кучино",
+            "Ольгино",
+            "Железнодорожная"
+        ),
+        defaultFromIndex = 19,
+        defaultToIndex = 30
+    )
+)
 
 private data class Train(
     val number: String,
@@ -387,7 +746,8 @@ private data class Train(
         get() {
             val minutes = Duration.between(ZonedDateTime.now(MOSCOW_ZONE), departure).toMinutes()
             return when {
-                minutes <= 0 -> "сейчас"
+                minutes < 0 -> "${-minutes} мин назад"
+                minutes == 0L -> "сейчас"
                 minutes < 60 -> "через ${minutes} мин"
                 else -> TIME_FORMAT.format(departure)
             }
@@ -395,7 +755,11 @@ private data class Train(
     val badgeColor: Int
         get() {
             val minutes = Duration.between(ZonedDateTime.now(MOSCOW_ZONE), departure).toMinutes()
-            return if (minutes in 0..10) Color.rgb(255, 82, 96) else Palette.accent
+            return when {
+                minutes < 0 -> Palette.late
+                minutes in 0..10 -> Color.rgb(255, 82, 96)
+                else -> Palette.accent
+            }
         }
 }
 
@@ -409,19 +773,21 @@ private data class Stop(
 )
 
 private class RaspApi {
-    fun trains(direction: Direction): List<Train> {
-        val response = post(batchSearch(direction))
+    fun trains(direction: RouteDirection): List<Train> {
+        val context = parseContext(direction)
+        val response = post(batchSearch(context))
         val segments = response.getJSONArray("data")
             .getJSONObject(0)
             .getJSONObject("data")
             .getJSONObject("search")
             .getJSONArray("segments")
         val now = ZonedDateTime.now(MOSCOW_ZONE)
+        val cutoff = now.minusMinutes(3)
         val trains = mutableListOf<Train>()
         for (i in 0 until segments.length()) {
             val item = segments.getJSONObject(i)
             val dep = parseApiTime(item.getString("departureLocalDt"))
-            if (dep.isBefore(now.minusMinutes(1))) continue
+            if (dep.isBefore(cutoff)) continue
             val transport = item.optJSONObject("transport")
             val subtype = transport?.optJSONObject("subtype")
             val thread = item.getJSONObject("thread")
@@ -490,23 +856,41 @@ private class RaspApi {
         return JSONObject(text)
     }
 
-    private fun batchSearch(direction: Direction): JSONObject {
-        val from = station(direction.fromKey, direction.fromTitle, direction.fromSlug)
-        val to = station(direction.toKey, direction.toTitle, direction.toSlug)
-        val context = JSONObject()
+    private fun parseContext(direction: RouteDirection): JSONObject {
+        val response = post(
+            JSONObject().put(
+                "methods",
+                JSONArray().put(
+                    JSONObject()
+                        .put("method", "parseContext")
+                        .put(
+                            "params",
+                            JSONObject()
+                                .put("tld", "ru")
+                                .put("language", "ru")
+                                .put("transportType", "suburban")
+                                .put("fromTitle", direction.from)
+                                .put("toTitle", direction.to)
+                        )
+                )
+            )
+        )
+        val data = response.getJSONArray("data").getJSONObject(0).getJSONObject("data")
+        val errors = data.optJSONArray("errors")
+        if (errors != null && errors.length() > 0) error("Станции не найдены")
+        return data
+    }
+
+    private fun batchSearch(context: JSONObject): JSONObject {
+        val from = context.getJSONObject("from")
+        val to = context.getJSONObject("to")
+        context
             .put("userInput", JSONObject().put("from", from).put("to", to))
-            .put("transportType", "suburban")
-            .put("from", from)
-            .put("originalFrom", from)
-            .put("to", to)
-            .put("originalTo", to)
             .put("searchNext", false)
             .put("when", JSONObject().put("text", "на все дни").put("hint", "на все дни").put("special", "all-days").put("formatted", "на все дни"))
             .put("time", JSONObject().put("now", System.currentTimeMillis()).put("timezone", "Europe/Moscow"))
             .put("language", "ru")
             .put("searchForPastDate", false)
-            .put("sameSuburbanZone", true)
-            .put("distance", direction.distance)
 
         return JSONObject().put(
             "methods",
@@ -546,24 +930,6 @@ private class RaspApi {
                     )
             )
         )
-
-    private fun station(key: String, title: String, slug: String): JSONObject {
-        val isBel = key == "s2000006"
-        return JSONObject()
-            .put("key", key)
-            .put("title", title)
-            .put("timezone", "Europe/Moscow")
-            .put("country", JSONObject().put("code", "RU").put("title", "").put("railwayTimezone", "Europe/Moscow"))
-            .put("region", JSONObject().put("title", "Москва и Московская область"))
-            .put("settlement", JSONObject().put("title", "Москва").put("slug", "moscow").put("key", "c213"))
-            .put("titleGenitive", if (isBel) "Москвы (Белорусский вокзал)" else "Окружной")
-            .put("titleAccusative", if (isBel) "Москву (Белорусский вокзал)" else "Окружную")
-            .put("titleLocative", if (isBel) "Москве (Белорусский вокзал)" else "Окружной")
-            .put("preposition", "в")
-            .put("shortTitle", if (isBel) "М-Белорусск." else "")
-            .put("popularTitle", if (isBel) "Белорусский вокзал" else "")
-            .put("slug", slug)
-    }
 
     private fun parseApiTime(value: String): ZonedDateTime =
         OffsetDateTime.parse(value).atZoneSameInstant(MOSCOW_ZONE)
