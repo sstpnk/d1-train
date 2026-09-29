@@ -49,7 +49,7 @@ class MainActivity : Activity() {
     private lateinit var outboundList: LinearLayout
     private lateinit var inboundList: LinearLayout
     private var pullStartY = -1f
-    private var pullDistance = 0f
+    private var pullStartX = -1f
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -99,10 +99,41 @@ class MainActivity : Activity() {
         scroller = ScrollView(this).apply {
             setBackgroundColor(Palette.bg)
             isFillViewport = true
-            setPullToRefresh()
             addView(root, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
         return scroller
+    }
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                pullStartX = event.rawX
+                pullStartY = event.rawY
+                contentRoot.animate().cancel()
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                val deltaY = event.rawY - pullStartY
+                val deltaX = kotlin.math.abs(event.rawX - pullStartX)
+                if (pullStartY >= 0 && deltaY > dp(8) && deltaY > deltaX) {
+                    val maxPull = dp(136).toFloat()
+                    val rubber = maxPull * (1f - 1f / (1f + deltaY / maxPull))
+                    contentRoot.translationY = rubber
+                }
+            }
+
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                val deltaY = event.rawY - pullStartY
+                val deltaX = kotlin.math.abs(event.rawX - pullStartX)
+                if (pullStartY >= 0 && deltaY > dp(120) && deltaY > deltaX) {
+                    refresh()
+                }
+                contentRoot.animate().translationY(0f).setDuration(220).start()
+                pullStartX = -1f
+                pullStartY = -1f
+            }
+        }
+        return super.dispatchTouchEvent(event)
     }
 
     private fun directionPanel(lineId: String, from: String, to: String, hint: String, list: LinearLayout): View {
@@ -405,38 +436,6 @@ class MainActivity : Activity() {
         }.apply {
             setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         }
-
-    private fun ScrollView.setPullToRefresh() {
-        setOnTouchListener { view, event ->
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    pullStartY = event.rawY
-                    pullDistance = 0f
-                    contentRoot.animate().cancel()
-                }
-
-                MotionEvent.ACTION_MOVE -> {
-                    val delta = event.rawY - pullStartY
-                    if (pullStartY >= 0 && delta > 0) {
-                        val maxPull = dp(126).toFloat()
-                        pullDistance = maxPull * (1f - 1f / (1f + delta / maxPull))
-                        contentRoot.translationY = pullDistance
-                    }
-                }
-
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    val delta = event.rawY - pullStartY
-                    if (pullStartY >= 0 && delta > dp(120)) {
-                        refresh()
-                    }
-                    contentRoot.animate().translationY(0f).setDuration(220).start()
-                    pullStartY = -1f
-                    pullDistance = 0f
-                }
-            }
-            false
-        }
-    }
 
     private fun stopRow(stop: Stop, last: Boolean): View {
         val row = LinearLayout(this).apply {
