@@ -1,4 +1,4 @@
-package com.sstpnk.mcd
+package tech.stpnk.mcd
 
 import android.app.Activity
 import android.app.Dialog

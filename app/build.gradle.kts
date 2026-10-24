@@ -4,11 +4,11 @@ apply(plugin = "com.android.application")
 apply(plugin = "org.jetbrains.kotlin.android")
 
 extensions.configure<ApplicationExtension>("android") {
-    namespace = "com.sstpnk.mcd"
+    namespace = "tech.stpnk.mcd"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.sstpnk.mcd"
+        applicationId = "tech.stpnk.mcd"
         minSdk = 26
         targetSdk = 35
         versionCode = 1
