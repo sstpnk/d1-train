@@ -2,7 +2,9 @@ package tech.stpnk.mcd
 
 import android.app.Activity
 import android.app.Dialog
+import android.app.TimePickerDialog
 import android.content.Context
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -23,6 +25,7 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.Spinner
+import android.widget.Switch
 import android.widget.TextView
 import org.json.JSONArray
 import org.json.JSONObject
@@ -31,6 +34,7 @@ import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
 import java.time.Duration
+import java.time.LocalTime
 import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.ZonedDateTime
@@ -50,6 +54,14 @@ class MainActivity : Activity() {
     private lateinit var inboundList: LinearLayout
     private var pullStartY = -1f
     private var pullStartX = -1f
+    private var routeIsReversed = false
+    private val clockTicker = object : Runnable {
+        override fun run() {
+            updateClock()
+            if (isRouteReversedByTime() != routeIsReversed) refresh()
+            main.postDelayed(this, CLOCK_TICK_MS)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -59,7 +71,19 @@ class MainActivity : Activity() {
         refresh()
     }
 
+    override fun onResume() {
+        super.onResume()
+        main.removeCallbacks(clockTicker)
+        main.post(clockTicker)
+    }
+
+    override fun onPause() {
+        main.removeCallbacks(clockTicker)
+        super.onPause()
+    }
+
     override fun onDestroy() {
+        main.removeCallbacks(clockTicker)
         io.shutdownNow()
         super.onDestroy()
     }
@@ -171,9 +195,11 @@ class MainActivity : Activity() {
     }
 
     private fun refresh() {
-        val now = ZonedDateTime.now(MOSCOW_ZONE)
-        clock.text = "Московское время: ${TIME_FORMAT.format(now)}"
-        val route = selectedRoute()
+        updateClock()
+        routeIsReversed = isRouteReversedByTime()
+        val route = selectedRoute()?.let { route ->
+            if (routeIsReversed) route.reversed() else route
+        }
         board.removeAllViews()
         if (route == null) {
             showEmptySelection()
@@ -193,6 +219,19 @@ class MainActivity : Activity() {
 
         loadDirection(RouteDirection(route.line, route.from, route.to), outboundList)
         loadDirection(RouteDirection(route.line, route.to, route.from), inboundList)
+    }
+
+    private fun updateClock() {
+        val now = ZonedDateTime.now(MOSCOW_ZONE)
+        clock.text = "Московское время: ${TIME_FORMAT.format(now)}"
+    }
+
+    private fun isRouteReversedByTime(): Boolean {
+        if (!prefs.getBoolean(PREF_TIME_BASED_DIRECTION, false)) return false
+        val switchMinutes = prefs.getInt(PREF_DIRECTION_SWITCH_MINUTES, DEFAULT_DIRECTION_SWITCH_MINUTES)
+            .coerceIn(0, MINUTES_IN_DAY - 1)
+        val now = LocalTime.now()
+        return now.hour * 60 + now.minute >= switchMinutes
     }
 
     private fun loadDirection(direction: RouteDirection, container: LinearLayout) {
@@ -352,6 +391,66 @@ class MainActivity : Activity() {
         body.addView(fromSpinner)
         body.addView(label("Конечная станция", 13f, Palette.muted, false).apply { setPadding(0, dp(12), 0, dp(4)) })
         body.addView(toSpinner)
+
+        val timeBasedDirection = Switch(this).apply {
+            text = "Менять начальную станцию по времени дня"
+            textSize = 15f
+            setTextColor(Palette.text)
+            isChecked = prefs.getBoolean(PREF_TIME_BASED_DIRECTION, false)
+            buttonTintList = ColorStateList(
+                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                intArrayOf(Palette.accent, Palette.muted)
+            )
+            setPadding(0, dp(14), 0, 0)
+        }
+        body.addView(timeBasedDirection)
+
+        var switchMinutes = prefs
+            .getInt(PREF_DIRECTION_SWITCH_MINUTES, DEFAULT_DIRECTION_SWITCH_MINUTES)
+            .coerceIn(0, MINUTES_IN_DAY - 1)
+        val switchTimeLabel = label("Время смены направления", 13f, Palette.muted, false).apply {
+            setPadding(0, dp(8), 0, dp(4))
+        }
+        val switchTime = pill(formatLocalTime(switchMinutes), Palette.card, Palette.text).apply {
+            isClickable = true
+            contentDescription = "Выбрать время смены направления"
+        }
+        val directionHint = label("", 12f, Palette.muted, false).apply {
+            setPadding(0, dp(6), 0, 0)
+        }
+
+        fun updateTimeBasedDirectionControls() {
+            val enabled = timeBasedDirection.isChecked
+            val alpha = if (enabled) 1f else 0.42f
+            switchTimeLabel.alpha = alpha
+            switchTime.alpha = alpha
+            switchTime.isEnabled = enabled
+            directionHint.alpha = alpha
+            directionHint.text = if (enabled) {
+                "До ${formatLocalTime(switchMinutes)} — станция 1 → станция 2; после — наоборот."
+            } else {
+                "Время задаётся в локальном часовом поясе устройства."
+            }
+        }
+
+        timeBasedDirection.setOnCheckedChangeListener { _, _ -> updateTimeBasedDirectionControls() }
+        switchTime.setOnClickListener {
+            TimePickerDialog(
+                this@MainActivity,
+                { _, hour, minute ->
+                    switchMinutes = hour * 60 + minute
+                    switchTime.text = formatLocalTime(switchMinutes)
+                    updateTimeBasedDirectionControls()
+                },
+                switchMinutes / 60,
+                switchMinutes % 60,
+                true
+            ).show()
+        }
+        body.addView(switchTimeLabel)
+        body.addView(switchTime)
+        body.addView(directionHint)
+        updateTimeBasedDirectionControls()
         body.addView(error)
 
         fun updateStations(line: McdLine, keepSelection: Boolean) {
@@ -396,6 +495,8 @@ class MainActivity : Activity() {
                     .putString(PREF_LINE, activeLine.id)
                     .putString(PREF_FROM, from)
                     .putString(PREF_TO, to)
+                    .putBoolean(PREF_TIME_BASED_DIRECTION, timeBasedDirection.isChecked)
+                    .putInt(PREF_DIRECTION_SWITCH_MINUTES, switchMinutes)
                     .apply()
                 dialog.dismiss()
                 refresh()
@@ -416,6 +517,9 @@ class MainActivity : Activity() {
         val to = prefs.getString(PREF_TO, null)?.takeIf { it in line.stations && it != from } ?: return null
         return RouteConfig(line, from, to)
     }
+
+    private fun formatLocalTime(minutes: Int): String =
+        LocalTime.of(minutes / 60, minutes % 60).format(TIME_FORMAT)
 
     private fun spinnerAdapter(items: List<String>): ArrayAdapter<String> =
         object : ArrayAdapter<String>(this, android.R.layout.simple_spinner_item, items) {
@@ -544,6 +648,11 @@ private object Palette {
 private const val PREF_LINE = "line"
 private const val PREF_FROM = "from"
 private const val PREF_TO = "to"
+private const val PREF_TIME_BASED_DIRECTION = "time_based_direction"
+private const val PREF_DIRECTION_SWITCH_MINUTES = "direction_switch_minutes"
+private const val DEFAULT_DIRECTION_SWITCH_MINUTES = 14 * 60
+private const val MINUTES_IN_DAY = 24 * 60
+private const val CLOCK_TICK_MS = 30_000L
 
 private data class McdLine(
     val id: String,
@@ -557,7 +666,9 @@ private data class RouteConfig(
     val line: McdLine,
     val from: String,
     val to: String
-)
+) {
+    fun reversed(): RouteConfig = copy(from = to, to = from)
+}
 
 private data class RouteDirection(
     val line: McdLine,
